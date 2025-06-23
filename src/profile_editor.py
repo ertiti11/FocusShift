@@ -3,8 +3,11 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                              QComboBox, QGroupBox, QMessageBox, QSplitter,
                              QListWidgetItem, QWidget, QFormLayout, QScrollArea)
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QIcon
 import time
+import keyboard
+import os
+from PyQt5.QtWidgets import QDialog
 class ProfileEditor(QDialog):
     profile_saved = pyqtSignal()
     
@@ -14,20 +17,44 @@ class ProfileEditor(QDialog):
         self.available_programs = available_programs
         self.profile_manager = profile_manager
         self.selected_programs = []
+        self.profile_hotkey = ""  # Definir antes de llamar a init_ui
         
         self.init_ui()
         self.load_existing_profile()
         
+        # Si ya existe el perfil, cargamos la hotkey del JSON
+        profiles = self.profile_manager.load_profiles()
+        profile = profiles.get(self.profile_name, {})
+        self.profile_hotkey = profile.get('hotkey', "")
+        self.hotkey_display.setText(self.profile_hotkey)
     def init_ui(self):
         self.setWindowTitle(f"Editor de Perfil: {self.profile_name}")
         self.setGeometry(150, 150, 1200, 800)
         
         layout = QVBoxLayout(self)
         
+        # Checkbox cerrar otras ventanas
+        self.close_others_checkbox = QCheckBox("Cerrar otras ventanas al ejecutar este perfil")
+        self.close_others_checkbox.setChecked(False)
+        layout.addWidget(self.close_others_checkbox)
+        
         # Nombre del perfil
         name_layout = QHBoxLayout()
         name_layout.addWidget(QLabel("Nombre del perfil:"))
         self.name_edit = QLineEdit(self.profile_name)
+        hotkey_layout = QHBoxLayout()
+        hotkey_layout.addWidget(QLabel("Combinación de teclas (hotkey):"))
+
+        self.hotkey_display = QLineEdit()
+        self.hotkey_display.setReadOnly(True)
+        self.hotkey_display.setText(self.profile_hotkey)
+        hotkey_layout.addWidget(self.hotkey_display)
+
+        self.record_hotkey_btn = QPushButton("Grabar Hotkey")
+        self.record_hotkey_btn.clicked.connect(self.record_hotkey)
+        hotkey_layout.addWidget(self.record_hotkey_btn)
+
+        layout.addLayout(hotkey_layout)
         name_layout.addWidget(self.name_edit)
         layout.addLayout(name_layout)
         
@@ -69,7 +96,33 @@ class ProfileEditor(QDialog):
         buttons_layout.addWidget(cancel_btn)
         
         layout.addLayout(buttons_layout)
+    def record_hotkey(self):
+        msg = QMessageBox()
+        msg.setWindowTitle("Grabando Hotkey")
+        msg.setText("Pulsa la combinación de teclas...\n(esc para cancelar)")
+        msg.setStandardButtons(QMessageBox.NoButton)
+        msg.show()
         
+        recorded = []
+
+        def on_press(e):
+            key = e.name
+            if key == 'esc':
+                keyboard.unhook_all()
+                msg.done(0)
+            elif key not in recorded:
+                recorded.append(key)
+            if len(recorded) >= 3:  # hasta 3 teclas (por ejemplo: ctrl+alt+t)
+                combo = '+'.join(recorded)
+                self.profile_hotkey = combo
+                self.hotkey_display.setText(combo)
+                keyboard.unhook_all()
+                msg.done(0)
+
+        keyboard.unhook_all()
+        keyboard.on_press(on_press)
+
+
     def create_available_programs_panel(self):
         """Crear panel de programas disponibles"""
         group = QGroupBox("Programas Disponibles")
@@ -142,7 +195,7 @@ class ProfileEditor(QDialog):
         
         # Monitor
         self.monitor_combo = QComboBox()
-        self.monitor_combo.addItems(["Principal", "Secundario"])
+        self.monitor_combo.addItems(["0", "1"])
         layout.addRow("Monitor:", self.monitor_combo)
         
         # Estado de la ventana
@@ -201,11 +254,21 @@ class ProfileEditor(QDialog):
         return group
         
     def populate_available_programs(self):
-        """Poblar lista de programas disponibles"""
+        """Poblar lista de programas disponibles con iconos"""
         self.available_list.clear()
         for program in self.available_programs:
             item = QListWidgetItem(f"{program['name']}")
             item.setData(Qt.UserRole, program)
+            # Intentar obtener el icono del ejecutable
+            icon = None
+            exe_path = program.get('path', '')
+            if os.path.exists(exe_path) and exe_path.lower().endswith('.exe'):
+                try:
+                    icon = QIcon(exe_path)
+                except Exception:
+                    icon = None
+            if icon and not icon.isNull():
+                item.setIcon(icon)
             self.available_list.addItem(item)
             
     def filter_programs(self):
@@ -288,27 +351,25 @@ class ProfileEditor(QDialog):
         if current_row >= 0:
             program = self.selected_programs[current_row]
             self.config_panel.setEnabled(True)
-            
             # Cargar configuración en los controles
             config = program.get('window_config', {})
-            
-            monitor = 'Secundario' if config.get('monitor') == 'secondary' else 'Principal'
-            self.monitor_combo.setCurrentText(monitor)
-            
+            # Corregido: detectar correctamente el monitor
+            monitor = config.get('monitor', 'primary')
+            if monitor == 'secondary':
+                self.monitor_combo.setCurrentText('Secundario')
+            else:
+                self.monitor_combo.setCurrentText('Principal')
             if config.get('maximized', False):
                 self.window_state_combo.setCurrentText('Maximizada')
             elif program.get('start_minimized', False):
                 self.window_state_combo.setCurrentText('Minimizada')
             else:
                 self.window_state_combo.setCurrentText('Normal')
-                
             self.x_spin.setValue(config.get('x', 100))
             self.y_spin.setValue(config.get('y', 100))
             self.width_spin.setValue(config.get('width', 800))
             self.height_spin.setValue(config.get('height', 600))
-            
             self.avoid_duplicates_check.setChecked(program.get('avoid_duplicates', True))
-            
             self.on_window_state_changed()
             
     def on_window_state_changed(self):
@@ -345,6 +406,8 @@ class ProfileEditor(QDialog):
             profile = profiles[self.profile_name]
             self.selected_programs = profile.get('programs', [])
             self.update_selected_list()
+            # Cargar estado del checkbox si existe
+            self.close_others_checkbox.setChecked(profile.get('close_others', False))
             
     def save_profile(self):
         """Guardar el perfil"""
@@ -365,7 +428,9 @@ class ProfileEditor(QDialog):
         profile_data = {
             'programs': self.selected_programs,
             'created_at': self.profile_manager.load_profiles().get(self.profile_name, {}).get('created_at', ''),
-            'modified_at': str(int(time.time()))
+            'modified_at': str(int(time.time())),
+            'close_others': self.close_others_checkbox.isChecked(),
+            'hotkey': self.profile_hotkey
         }
         
         # Si el nombre cambió, eliminar el perfil anterior

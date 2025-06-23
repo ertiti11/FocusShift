@@ -1,12 +1,9 @@
 import json
 import os
-import subprocess
+import threading
 import time
-import win32gui
-import win32con
-import win32process
-import psutil
 from pathlib import Path
+from src.window_manager import launch_and_place_window
 
 class ProfileManager:
     def __init__(self):
@@ -15,32 +12,31 @@ class ProfileManager:
         os.makedirs(self.data_dir, exist_ok=True)
         
     def load_profiles(self):
-        """Cargar perfiles desde archivo JSON"""
         if os.path.exists(self.profiles_file):
             try:
                 with open(self.profiles_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except (json.JSONDecodeError, IOError):
+                print(f"[ERROR] No se pudo leer el archivo de perfiles: {self.profiles_file}")
                 return {}
         return {}
         
     def save_profiles(self, profiles):
-        """Guardar perfiles en archivo JSON"""
         try:
             with open(self.profiles_file, 'w', encoding='utf-8') as f:
                 json.dump(profiles, f, indent=2, ensure_ascii=False)
             return True
-        except IOError:
+        except IOError as e:
+            print(f"[ERROR] No se pudo guardar el archivo de perfiles: {e}")
             return False
             
     def save_profile(self, profile_name, profile_data):
-        """Guardar un perfil específico"""
         profiles = self.load_profiles()
         profiles[profile_name] = profile_data
-        return self.save_profiles(profiles)
+        saved = self.save_profiles(profiles)
+        return saved
         
     def delete_profile(self, profile_name):
-        """Eliminar un perfil"""
         profiles = self.load_profiles()
         if profile_name in profiles:
             del profiles[profile_name]
@@ -48,137 +44,105 @@ class ProfileManager:
         return False
         
     def profile_exists(self, profile_name):
-        """Verificar si existe un perfil"""
         profiles = self.load_profiles()
         return profile_name in profiles
-        
+
     def execute_profile(self, profile_name):
-        """Ejecutar un perfil completo"""
-        profiles = self.load_profiles()
-        if profile_name not in profiles:
-            raise ValueError(f"Perfil '{profile_name}' no encontrado")
-            
-        profile = profiles[profile_name]
-        success_count = 0
-        
-        for program_config in profile.get('programs', []):
+        """Ejecuta un perfil de programas en un hilo separado usando window_manager."""
+        def run_program_threaded(program_config):
             try:
-                if self._launch_program(program_config):
-                    success_count += 1
+                self._launch_and_place_program(program_config)
             except Exception as e:
                 print(f"Error al lanzar {program_config.get('name', 'programa')}: {e}")
-                
-        return success_count
-        
-    def _launch_program(self, program_config):
-        """Lanzar un programa individual con su configuración"""
-        program_path = program_config['path']
-        
-        # Verificar si el programa ya está ejecutándose
-        if program_config.get('avoid_duplicates', True):
-            if self._is_program_running(program_path):
-                print(f"El programa {program_config['name']} ya está ejecutándose")
-                return True
-                
-        try:
-            # Lanzar el programa
-            if program_config.get('start_minimized', False):
-                # Iniciar minimizado
-                process = subprocess.Popen([program_path], 
-                                         creationflags=subprocess.CREATE_NO_WINDOW)
+
+        def run_profile_logic():
+            profiles = self.load_profiles()
+            if profile_name not in profiles:
+                print(f"Perfil '{profile_name}' no encontrado")
+                return
+
+            profile = profiles[profile_name]
+            threads = []
+            for program_config in profile.get('programs', []):
+                t = threading.Thread(target=run_program_threaded, args=(program_config,), daemon=True)
+                t.start()
+                threads.append(t)
+            print(f"Programas lanzados para el perfil '{profile_name}': {len(threads)}")
+
+        threading.Thread(target=run_profile_logic, daemon=True).start()
+
+    def _launch_and_place_program(self, program_config):
+        """Lanza y coloca el programa usando window_manager."""
+        exe_path = program_config['path']
+        window_cfg = program_config.get('window_config', {})
+        fallback_title = program_config.get('window_title')
+        maximize = window_cfg.get('maximized', False)
+        minimize = window_cfg.get('minimized', False)
+        width = window_cfg.get('width')
+        height = window_cfg.get('height')
+        x = window_cfg.get('x', 0)
+        y = window_cfg.get('y', 0)
+        monitor = window_cfg.get('monitor', 'primary')
+
+        # ---
+        # SOPORTE PARA monitor COMO ÍNDICE O COMO STRING ('primary'/'secondary')
+        # Se recomienda guardar el monitor como número (0=primario, 1=secundario, ...)
+        # Ejemplo de perfil recomendado:
+        #   "window_config": { "monitor": 1, ... }
+        # Si se usa 'primary' o 'secondary', se traduce a índice automáticamente.
+        from screeninfo import get_monitors
+        monitors = get_monitors()
+        monitor_index = 0
+        if isinstance(monitor, int):
+            if 0 <= monitor < len(monitors):
+                monitor_index = monitor
             else:
-                process = subprocess.Popen([program_path])
-                
-            # Esperar un poco para que el programa se inicie
-            time.sleep(2)
-            
-            # Configurar la ventana si es necesario
-            if not program_config.get('start_minimized', False):
-                self._configure_window(program_config, process.pid)
-                
+                print(f"[WARN] Monitor {monitor} fuera de rango, usando 0")
+                monitor_index = 0
+        elif isinstance(monitor, str):
+            if monitor == 'secondary' and len(monitors) > 1:
+                for idx, m in enumerate(monitors):
+                    if not getattr(m, 'is_primary', False):
+                        monitor_index = idx
+                        break
+                else:
+                    monitor_index = 1
+            elif monitor == 'primary':
+                for idx, m in enumerate(monitors):
+                    if getattr(m, 'is_primary', False):
+                        monitor_index = idx
+                        break
+                else:
+                    monitor_index = 0
+            else:
+                print(f"[WARN] Valor de monitor desconocido: {monitor}, usando 0")
+                monitor_index = 0
+        else:
+            print(f"[WARN] Tipo de monitor no soportado: {type(monitor)}, usando 0")
+            monitor_index = 0
+
+        print(f"Configurando programa: {program_config['name']} en monitor {monitor_index} (valor original: {monitor})")
+        hwnd = launch_and_place_window(
+            exe_path=exe_path,
+            monitor_index=monitor_index,
+            width=width,
+            height=height,
+            x_offset=x,
+            y_offset=y,
+            maximize=maximize,
+            minimize=minimize,
+            fallback_title=fallback_title,
+            timeout=10
+        )
+        if hwnd:
+            print(f"Ventana configurada correctamente: {hwnd}")
             return True
-            
-        except Exception as e:
-            print(f"Error al lanzar programa: {e}")
+        else:
+            print("No se pudo configurar la ventana.")
             return False
-            
-    def _is_program_running(self, program_path):
-        """Verificar si un programa está ejecutándose"""
-        program_name = os.path.basename(program_path).lower()
-        
-        for proc in psutil.process_iter(['pid', 'name', 'exe']):
-            try:
-                if proc.info['exe'] and os.path.basename(proc.info['exe']).lower() == program_name:
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-                
-        return False
-        
-    def _configure_window(self, program_config, pid):
-        """Configurar la ventana del programa"""
-        # Buscar la ventana del proceso
-        windows = []
-        
-        def enum_windows_callback(hwnd, windows):
-            if win32gui.IsWindowVisible(hwnd):
-                _, window_pid = win32process.GetWindowThreadProcessId(hwnd)
-                if window_pid == pid:
-                    windows.append(hwnd)
-            return True
-            
-        # Intentar varias veces ya que la ventana puede tardar en aparecer
-        for attempt in range(10):
-            windows.clear()
-            win32gui.EnumWindows(enum_windows_callback, windows)
-            
-            if windows:
-                break
-                
-            time.sleep(0.5)
-            
-        if not windows:
-            print("No se pudo encontrar la ventana del programa")
-            return
-            
-        hwnd = windows[0]  # Usar la primera ventana encontrada
-        
-        # Configurar posición y tamaño
-        if 'window_config' in program_config:
-            config = program_config['window_config']
-            
-            # Maximizar si es necesario
-            if config.get('maximized', False):
-                win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
-            else:
-                # Configurar posición y tamaño personalizados
-                x = config.get('x', 100)
-                y = config.get('y', 100)
-                width = config.get('width', 800)
-                height = config.get('height', 600)
-                
-                win32gui.SetWindowPos(hwnd, 0, x, y, width, height, 0)
-                
-            # Configurar monitor si se especifica
-            monitor = config.get('monitor', 'primary')
-            if monitor == 'secondary':
-                self._move_to_secondary_monitor(hwnd)
-                
-    def _move_to_secondary_monitor(self, hwnd):
-        """Mover ventana al monitor secundario"""
-        try:
-            # Obtener información de monitores
-            monitors = win32gui.EnumDisplayMonitors()
-            
-            if len(monitors) > 1:
-                # Obtener el segundo monitor
-                secondary_monitor = monitors[1][2]  # (left, top, right, bottom)
-                
-                # Mover la ventana al monitor secundario
-                win32gui.SetWindowPos(hwnd, 0, 
-                                    secondary_monitor[0] + 100,  # x
-                                    secondary_monitor[1] + 100,  # y
-                                    0, 0,  # width, height (mantener actual)
-                                    win32con.SWP_NOSIZE)
-        except Exception as e:
-            print(f"Error al mover ventana al monitor secundario: {e}")
+
+    # ---
+    # NOTA: Para máxima compatibilidad, guarda los perfiles con el monitor como número (0=primario, 1=secundario, ...)
+    # Ejemplo:
+    #   "window_config": { "monitor": 1, ... }
+    # ---

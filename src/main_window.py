@@ -20,6 +20,8 @@ class MainWindow(QMainWindow):
         self.init_ui()
         self.load_profiles()
         self.scan_programs()
+        self.hotkey_manager.hotkey_pressed.connect(self.execute_profile_by_name)
+        self.hotkey_manager.start_monitoring()
         
     def init_ui(self):
         self.setWindowTitle("Gestor de Perfiles de Programas")
@@ -49,7 +51,12 @@ class MainWindow(QMainWindow):
         
         # Barra de estado
         self.statusBar().showMessage("Listo")
-        
+    def execute_profile_by_name(self, profile_name):
+        if self.profile_manager.profile_exists(profile_name):
+            self.statusBar().showMessage(f"Hotkey ejecuta: {profile_name}")
+            self.profile_manager.execute_profile(profile_name)
+        else:
+            self.statusBar().showMessage(f"Perfil no encontrado: {profile_name}")        
     def create_profiles_panel(self):
         """Crear panel de perfiles guardados"""
         group = QGroupBox("Perfiles Guardados")
@@ -224,8 +231,16 @@ class MainWindow(QMainWindow):
         self.execute_btn.setEnabled(has_selection)
         
     def on_profile_saved(self):
-        """Callback cuando se guarda un perfil"""
         self.load_profiles()
+
+        # Registra la hotkey del perfil recién guardado
+        profile_name = self.profile_editor.profile_name
+        profiles = self.profile_manager.load_profiles()
+        profile = profiles.get(profile_name)
+        if profile:
+            hotkey = profile.get('hotkey')
+            if hotkey:
+                self.hotkey_manager.register_hotkey(hotkey, profile_name)
         
     def closeEvent(self, event):
         """Manejar cierre de la aplicación"""

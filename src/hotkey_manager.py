@@ -1,6 +1,7 @@
 import threading
 import time
 from PyQt5.QtCore import QObject, pyqtSignal
+import keyboard
 
 class HotkeyManager(QObject):
     hotkey_pressed = pyqtSignal(str)
@@ -37,10 +38,8 @@ class HotkeyManager(QObject):
             self.thread.join()
             
     def _monitor_keys(self):
-        """Monitorear teclas (implementación básica)"""
-        # Esta es una implementación placeholder
-        # En una implementación real, se usaría la API de Windows
-        # para detectar combinaciones de teclas globales
+        for combo, profile_name in self.registered_hotkeys.items():
+            keyboard.add_hotkey(combo, lambda name=profile_name: self.hotkey_pressed.emit(name))
         while self.running:
             time.sleep(0.1)
             
